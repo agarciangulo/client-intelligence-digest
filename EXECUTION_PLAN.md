@@ -140,80 +140,197 @@ print('Dev cache OK')
 
 ---
 
-## Phase 1 — Source Scraper (Dual-Path, No LLM Needed)
+## Phase 1 — Source Scraper (Dual-Path, Two-Phase, No LLM Needed)
 
-This is the foundation. The scraper has two paths that need to work independently.
+This is the foundation. The scraper uses a two-phase approach for each source: **list extraction** (get article metadata) then **content extraction** (follow links for full text). See `SCRAPING_SPECS.md` for detailed per-source selectors and behavior.
 
-### 1.1 HTML Adapter (Shared by Both Paths)
+### 1.1 Article Data Model
 
-- [ ] Implement core HTML scraping in `scraper.py` using `requests` + `BeautifulSoup`
-- [ ] Accept per-source CSS selectors from config
-- [ ] Extract article list, then title/link/date/body for each article
-- [ ] Handle relative URLs (convert to absolute)
-- [ ] Return `Article` dataclass objects
+- [ ] Define `Article` dataclass in `scraper.py`
+- [ ] Include nullable `publish_date` (Featured Stories have no dates)
+- [ ] Include `external_source` field (for In the News source names)
+- [ ] Include `summary` field (separate from full `body`)
 
-**✅ Checkpoint 1.1 — Test HTML scraping against a real Draper page:**
+**✅ Checkpoint 1.1:**
 ```bash
 python -c "
-from src.scraper import fetch_html_articles
-
-articles = fetch_html_articles({
-    'name': 'Draper News Releases',
-    'url': 'https://www.draper.com/media-center/news-releases',
-    'type': 'html',
-    'selectors': {
-        # Selectors TBD — will be defined during scraping investigation
-    }
-})
-print(f'Fetched {len(articles)} articles')
-for a in articles[:5]:
-    print(f'  - {a.title[:60]}... ({a.publish_date})')
-    print(f'    URL: {a.url}')
+from src.scraper import Article
+a = Article(url='https://example.com', url_hash='abc', title='Test', body='Body text',
+            summary='Short summary', publish_date=None, source_name='Test Source',
+            source_type='html_cards', source_path='client', external_source=None,
+            client='Draper', matched_projects=[], matched_keywords=[], context_snippets=[])
+print(f'{a.title} — client={a.client}, date={a.publish_date}')
+print('Article dataclass OK')
 "
 ```
-Expected: Articles extracted from Draper's page with populated titles, URLs, and dates.
-
-**⚠️ This checkpoint requires defining CSS selectors for the Draper pages first. See scraping investigation notes.**
 
 ---
 
-### 1.2 RSS Adapter (General Sources)
+### 1.2 JSON-in-HTML List Extractor (News Releases)
+
+- [ ] Implement `extract_json_script_articles()` — parses the `<script id="site-news">` JSON tag
+- [ ] Extract title, URL, and ISO date from each entry
+- [ ] See `SCRAPING_SPECS.md` §4.1 for JSON structure
+
+**✅ Checkpoint 1.2 — Test against live News Releases page:**
+```bash
+python -c "
+from src.scraper import extract_json_script_articles
+import requests
+
+html = requests.get('https://www.draper.com/media-center/news-releases').text
+articles = extract_json_script_articles(html, script_id='site-news',
+    fields={'title': 'title.raw', 'url': 'url.raw', 'date': 'published_time.raw'})
+
+print(f'Extracted {len(articles)} articles from JSON')
+for a in articles[:3]:
+    print(f'  {a[\"date\"]} — {a[\"title\"][:60]}')
+    print(f'    {a[\"url\"][:80]}')
+"
+```
+Expected: 12 articles with ISO dates and absolute URLs.
+
+---
+
+### 1.3 HTML Card List Extractor (In the News, Featured Stories)
+
+- [ ] Implement `extract_html_card_articles()` — parses `<article>` card elements
+- [ ] Support configurable CSS selectors from source config
+- [ ] Handle optional fields (date, source_name, subtitle)
+- [ ] Convert relative URLs to absolute using `base_url`
+- [ ] See `SCRAPING_SPECS.md` §4.2 and §4.3 for selectors
+
+**✅ Checkpoint 1.3a — Test against live In the News page:**
+```bash
+python -c "
+from src.scraper import extract_html_card_articles
+import requests
+
+html = requests.get('https://www.draper.com/media-center/in-the-news').text
+selectors = {
+    'container': 'article.media.card',
+    'title': '.media-heading a',
+    'link': '.media-heading a',
+    'link_attribute': 'href',
+    'date': 'time',
+    'date_attribute': 'datetime',
+    'source_name': '.news-source'
+}
+articles = extract_html_card_articles(html, selectors, base_url='https://www.draper.com')
+
+print(f'Extracted {len(articles)} articles')
+for a in articles[:3]:
+    print(f'  {a.get(\"date\", \"no date\")} — {a[\"title\"][:50]}')
+    print(f'    Source: {a.get(\"external_source\", \"N/A\")}')
+    print(f'    URL: {a[\"url\"][:60]}')
+"
+```
+Expected: 12 articles with dates, source names, and external URLs.
+
+**✅ Checkpoint 1.3b — Test against live Featured Stories page (no dates):**
+```bash
+python -c "
+from src.scraper import extract_html_card_articles
+import requests
+
+html = requests.get('https://www.draper.com/media-center/featured-stories').text
+selectors = {
+    'container': 'article.media.card',
+    'title': '.media-heading a',
+    'link': '.media-heading a',
+    'link_attribute': 'href',
+    'subtitle': '.media-heading p'
+}
+articles = extract_html_card_articles(html, selectors, base_url='https://www.draper.com')
+
+print(f'Extracted {len(articles)} articles')
+for a in articles[:3]:
+    print(f'  {a[\"title\"][:50]}')
+    print(f'    Date: {a.get(\"date\", \"NONE (expected)\")}')
+    print(f'    URL: {a[\"url\"][:60]}')
+"
+```
+Expected: 12 articles with titles and absolute URLs, no dates.
+
+---
+
+### 1.4 RSS Adapter (Defense News)
 
 - [ ] Implement RSS parsing in `scraper.py` using `feedparser`
-- [ ] Parse feed entries into `Article` dataclass
+- [ ] Extract full article text from `content:encoded` (Defense News includes it)
+- [ ] Fall back to `description` if full content not available
 - [ ] Filter entries to configured lookback window (default 7 days)
-- [ ] Handle date parsing across common feed formats
 
-**✅ Checkpoint 1.2 — Test RSS scraping against Defense News:**
+**✅ Checkpoint 1.4 — Test RSS scraping against Defense News:**
 ```bash
 python -c "
 from src.scraper import fetch_rss_articles
 
 articles = fetch_rss_articles({
     'name': 'Defense News',
-    'url': 'https://www.defensenews.com/rss/',
+    'url': 'https://www.defensenews.com/arc/outboundfeeds/rss/?outputType=xml',
     'type': 'rss'
 })
 print(f'Fetched {len(articles)} articles from RSS')
 if articles:
     print(f'First: {articles[0].title}')
-    print(f'URL: {articles[0].url}')
     print(f'Date: {articles[0].publish_date}')
     print(f'Body length: {len(articles[0].body)} chars')
+    print(f'Has full text: {len(articles[0].body) > 500}')
 "
 ```
-Expected: Articles returned with populated fields.
+Expected: Articles with full body text (500+ chars), not just summaries.
 
 ---
 
-### 1.3 Client-Specific Source Scraping
+### 1.5 Content Extraction via Link-Following (trafilatura)
 
-- [ ] Implement `scrape_client_sources()` that iterates over each client's `client_sources`
-- [ ] Auto-tag every scraped article with `client = client_name` and `source_path = "client"`
-- [ ] Rate-limit requests (3s between requests to same domain)
+- [ ] Implement `extract_article_content(url)` using trafilatura
+- [ ] Return body text + any extracted metadata (date, author)
+- [ ] Handle failures gracefully (return empty body with warning)
+- [ ] Apply rate limiting (3s same domain, 1s different domains)
+
+**✅ Checkpoint 1.5a — Test on a Draper detail page:**
+```bash
+python -c "
+from src.scraper import extract_article_content
+
+body, date = extract_article_content(
+    'https://www.draper.com/media-center/news-releases/detail/27523/draper-and-the-northeast-microelectronics-coalition-nemc-announce-chip-design-and-packaging-services-to-accelerate-technology-commercialization'
+)
+print(f'Body length: {len(body)} chars')
+print(f'Extracted date: {date}')
+print(f'First 200 chars: {body[:200]}')
+"
+```
+
+**✅ Checkpoint 1.5b — Test on an external article (In the News link):**
+```bash
+python -c "
+from src.scraper import extract_article_content
+
+body, date = extract_article_content(
+    'https://www.semiconductor-digest.com/draper-and-the-northeast-microelectronics-coalition-announce-chip-design-and-packaging-services/'
+)
+print(f'Body length: {len(body)} chars')
+print(f'Extracted date: {date}')
+print(f'First 200 chars: {body[:200]}')
+"
+```
+Expected: Non-empty body text from both Draper-hosted and external pages.
+
+---
+
+### 1.6 Client-Specific Source Scraping (Combined)
+
+- [ ] Implement `scrape_client_sources()` — iterates over each client's sources
+- [ ] Calls the correct list extractor based on `type` (json_script or html_cards)
+- [ ] Follows links (Phase 2) for sources where `follow_links: true`
+- [ ] Auto-tags every article with `client = client_name` and `source_path = "client"`
+- [ ] Applies date filtering (skip articles outside LOOKBACK_DAYS window)
 - [ ] Handle per-source failures (log, skip, continue)
 
-**✅ Checkpoint 1.3 — Scrape all Draper sources:**
+**✅ Checkpoint 1.6 — Full end-to-end for Draper:**
 ```bash
 python -c "
 from src.scraper import scrape_client_sources
@@ -222,27 +339,27 @@ import json
 clients = json.load(open('config/clients.json'))
 draper = clients['clients'][0]
 
-articles, failures = scrape_client_sources(draper)
+articles, failures = scrape_client_sources(draper, lookback_days=95)
 
 print(f'Client: {draper[\"client_name\"]}')
-print(f'Articles: {len(articles)}')
+print(f'Total articles: {len(articles)}')
 print(f'Failed sources: {len(failures)}')
 for a in articles[:5]:
     print(f'  [{a.source_name}] {a.title[:50]}...')
-    print(f'    client={a.client}, source_path={a.source_path}')
+    print(f'    date={a.publish_date}, body_len={len(a.body)}')
 "
 ```
-Expected: Articles from Draper's pages, all pre-tagged with `client="Draper"`.
+Expected: Articles from all 3 Draper sources, pre-tagged, with body text filled.
 
 ---
 
-### 1.4 General Source Scraping
+### 1.7 General Source Scraping
 
-- [ ] Implement `scrape_general_sources()` that iterates over general sources
+- [ ] Implement `scrape_general_sources()` — iterates over general sources
 - [ ] Tag articles with `source_path = "general"` and `client = None`
-- [ ] Handle mixed RSS/HTML general sources
+- [ ] RSS sources with full content skip link-following
 
-**✅ Checkpoint 1.4 — Scrape general sources:**
+**✅ Checkpoint 1.7 — Scrape general sources:**
 ```bash
 python -c "
 from src.scraper import scrape_general_sources
@@ -253,22 +370,22 @@ articles, failures = scrape_general_sources(general['general_sources'])
 
 print(f'General articles: {len(articles)}')
 print(f'Failed sources: {len(failures)}')
-for a in articles[:5]:
+for a in articles[:3]:
     print(f'  [{a.source_name}] {a.title[:50]}...')
-    print(f'    client={a.client}, source_path={a.source_path}')
+    print(f'    body_len={len(a.body)}, client={a.client}')
 "
 ```
-Expected: Articles from general sources, all with `client=None`.
+Expected: Articles with full body text, all with `client=None`.
 
 ---
 
-### 1.5 State Filtering & Deduplication
+### 1.8 State Filtering & Deduplication
 
 - [ ] Filter out articles whose URL hash exists in `state/processed.json`
 - [ ] Deduplicate by URL across all sources
 - [ ] Log counts: total scraped, already processed, new
 
-**✅ Checkpoint 1.5:**
+**✅ Checkpoint 1.8:**
 ```bash
 python -c "
 from src.scraper import scrape_client_sources, scrape_general_sources
@@ -293,37 +410,32 @@ print(f'New articles: {len(new_articles)}')
 
 ---
 
-### 1.6 Cache Scraped Articles (Dev Support)
+### 1.9 Cache Scraped Articles (Dev Support)
 
 - [ ] Save scraped articles to dev cache for downstream development
 
-**✅ Checkpoint 1.6:**
-```bash
-python -c "
-from src.dev_cache import save_cache
-# Assuming articles were scraped in previous checkpoints
-print('Articles cached for downstream development')
-"
-```
-
-### 1.7 Unit Tests for Scraper
+### 1.10 Unit Tests for Scraper
 
 - [ ] Write `tests/test_scraper.py`
-- [ ] Test Article dataclass construction
-- [ ] Test RSS parsing (mock feedparser response)
-- [ ] Test HTML parsing (mock HTML with selectors)
+- [ ] Test Article dataclass construction (including nullable date)
+- [ ] Test JSON-in-HTML extraction (mock News Releases HTML)
+- [ ] Test HTML card extraction (mock In the News HTML with dates)
+- [ ] Test HTML card extraction (mock Featured Stories HTML without dates)
+- [ ] Test RSS parsing (mock Defense News feed with full content)
+- [ ] Test trafilatura content extraction (mock detail page)
+- [ ] Test relative URL resolution
+- [ ] Test date filtering with nullable dates
 - [ ] Test client auto-tagging
-- [ ] Test date filtering and deduplication
 - [ ] Test error handling (mock network failures)
 
-**✅ Checkpoint 1.7:**
+**✅ Checkpoint 1.10:**
 ```bash
 pytest tests/test_scraper.py -v
 ```
 
-### 1.8 Commit
+### 1.11 Commit
 
-- [ ] Commit: "Add dual-path source scraper: client-specific + general, RSS + HTML adapters"
+- [ ] Commit: "Add two-phase source scraper: list extraction (JSON/HTML/RSS) + content following (trafilatura)"
 
 ---
 
@@ -702,18 +814,18 @@ Expected output:
 | Phase | Description | Estimated Time | Cumulative |
 |-------|-------------|---------------|------------|
 | **Phase 0** | Project setup | ~30 min | 30 min |
-| **Phase 1** | Source Scraper (dual-path) | ~3 hours | 3.5 hours |
-| **Phase 2** | Keyword Matcher + Merge | ~1.5 hours | 5 hours |
-| **Phase 3** | State Manager | ~1 hour | 6 hours |
-| **Phase 4** | LLM Summarizer + Highlights | ~2 hours | 8 hours |
-| **Phase 5** | Email Composition & Delivery | ~1.5 hours | 9.5 hours |
-| **Phase 6** | Pipeline Orchestration | ~1 hour | 10.5 hours |
-| **Phase 7** | GitHub Actions Deployment | ~30 min | 11 hours |
-| **Phase 8** | Hardening & Polish | ~1 hour | 12 hours |
+| **Phase 1** | Source Scraper (two-phase, dual-path) | ~4 hours | 4.5 hours |
+| **Phase 2** | Keyword Matcher + Merge | ~1.5 hours | 6 hours |
+| **Phase 3** | State Manager | ~1 hour | 7 hours |
+| **Phase 4** | LLM Summarizer + Highlights | ~2 hours | 9 hours |
+| **Phase 5** | Email Composition & Delivery | ~1.5 hours | 10.5 hours |
+| **Phase 6** | Pipeline Orchestration | ~1 hour | 11.5 hours |
+| **Phase 7** | GitHub Actions Deployment | ~30 min | 12 hours |
+| **Phase 8** | Hardening & Polish | ~1 hour | 13 hours |
 
-**Total estimated effort: ~12 hours**
+**Total estimated effort: ~13 hours**
 
-Phase 1 is the most variable — HTML scraping requires per-source selector tuning. Budget extra time there. Phase 4 (LLM stages) may also take longer for prompt iteration.
+Phase 1 is the most variable — it now involves three extraction strategies plus trafilatura integration. Budget extra time there. Phase 4 (LLM stages) may also take longer for prompt iteration.
 
 ---
 

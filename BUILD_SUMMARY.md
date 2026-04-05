@@ -72,9 +72,14 @@ The most important design decision. Sources fall into two fundamentally differen
 
 Both paths produce the same `Article` objects with the same fields. After tagging, everything downstream is path-agnostic. The merge point combines articles from both paths, deduplicates by URL, and groups by client.
 
-### HTML Scraping with Per-Source Selectors
+### Two-Phase Scraping with Link-Following
 
-Client-specific sources are almost always HTML pages with unique structures. Rather than hard-coding selectors per source, the config file defines CSS selectors for each source. This means adding a new client source is a config change, not a code change. General sources that have RSS feeds use `feedparser` instead.
+Client-specific sources are HTML pages with unique structures, but none of them include article body text on the list page itself. Scraping works in two phases:
+
+1. **List extraction** — Get article metadata (title, URL, date) from the index page using one of three strategies: JSON-in-HTML (`<script>` tag parsing), HTML card elements (CSS selectors), or RSS feeds.
+2. **Content extraction** — Follow each article's link to get the full text using `trafilatura`, a generic article extraction library that works on any web page.
+
+This two-phase approach is necessary because Draper's "In the News" links to external sites (Semiconductor Digest, Washington Technology, etc.) with unpredictable HTML structures. trafilatura handles all of them without per-site configuration. See `SCRAPING_SPECS.md` for full details.
 
 ### Keyword Matching Only on General Sources
 
@@ -109,7 +114,8 @@ Email delivery uses Python's built-in `smtplib` with a Gmail App Password. Zero 
 | Language | Python 3.12 | Richest scraping/AI ecosystem |
 | LLM | Claude Sonnet | Good summarization quality at reasonable cost |
 | RSS parsing | feedparser | Handles all feed formats, tolerant of malformed XML |
-| HTML scraping | requests + BeautifulSoup | Lightweight, config-driven selectors |
+| HTML scraping | requests + BeautifulSoup | Lightweight; list page extraction (JSON/HTML cards) |
+| Article extraction | trafilatura | Generic content extraction for link-following |
 | Keyword matching | Python `re` (word-boundary) | Fast, free, deterministic |
 | Email | Gmail SMTP (stdlib) | Zero cost, minimal code |
 | Scheduling | GitHub Actions cron | Free, zero infrastructure |
@@ -123,7 +129,7 @@ Email delivery uses Python's built-in `smtplib` with a Gmail App Password. Zero 
 
 | Metric | Value |
 |--------|-------|
-| Source types | 2 (client-specific HTML + general RSS/HTML) |
+| Source types | 3 extraction strategies (json_script, html_cards, rss) + trafilatura for link-following |
 | LLM calls per run | Variable (1 per client + 1 highlights) |
 | Per-project summary length | 100–200 words |
 | Highlight analysis length | 2–3 sentences each |
@@ -131,7 +137,7 @@ Email delivery uses Python's built-in `smtplib` with a Gmail App Password. Zero 
 | Weekly cost | ~$0.50–1.50 |
 | Monthly cost | ~$2–6 |
 | Lines of Python | ~990 (excluding tests and templates) |
-| Runtime dependencies | 6 |
+| Runtime dependencies | 7 |
 | External services | 3 (GitHub Actions, Anthropic, Gmail) |
 | Infrastructure to maintain | None |
 
@@ -142,7 +148,7 @@ Email delivery uses Python's built-in `smtplib` with a Gmail App Password. Zero 
 8 phases following "Build → Verify → Advance":
 
 1. **Project setup** — Structure, config files, logging, dev cache
-2. **Source scraper** — Dual-path: client-specific HTML + general RSS/HTML, rate limiting, state filtering
+2. **Source scraper** — Two-phase (list extraction + link-following), three strategies (JSON/HTML/RSS), trafilatura for content
 3. **Keyword matcher** — Word-boundary matching on general sources only + merge logic
 4. **State manager** — Load, update, prune, save, git commit
 5. **LLM stages** — Per-client summarizer (with project categorization), highlight selector
@@ -160,11 +166,20 @@ The dual-path model is the defining architectural feature. The key insight: clie
 
 ### The "In the News" Hybrid
 
-Some client pages (like Draper's "In the News") are curated lists of third-party articles about the client. These are client-specific sources by configuration, but they link to external content. The scraper handles this by extracting the article metadata (title, date, external URL) from the client's page. If the same article also appears in a general source RSS feed, the deduplication step catches it.
+Draper's "In the News" page is a curated list of third-party articles about Draper. It's a client-specific source by configuration, but every link points to an external site (Semiconductor Digest, Washington Technology, etc.). The scraper extracts metadata from Draper's page (title, date, source name, external URL), then follows each link using trafilatura to get the actual article content. If the same article also appears in a general source RSS feed, the deduplication step catches it.
 
-### Per-Source CSS Selectors
+### Three Extraction Strategies, One Interface
 
-Every HTML source has a different page structure. The config-driven selector approach means each source defines its own CSS selectors (article list container, title, link, date, body). Adding a new client source requires inspecting the HTML and adding selectors — but no code changes.
+Each source has a different page structure requiring a different extraction approach:
+- **News Releases** embed article data as JSON inside a `<script>` tag (Elastic AppSearch frontend)
+- **In the News** uses HTML card elements with dates, source names, and external links
+- **Featured Stories** uses similar HTML cards but with no dates anywhere
+
+All three produce the same output: a list of `(title, url, date)` tuples, normalized before content extraction. The config file defines which strategy and selectors to use per source.
+
+### The Featured Stories Date Problem
+
+Featured Stories have no reliable dates — not on the list page, not in the RSS feed (all dates are the feed generation timestamp), and not on the detail pages. The workaround: articles without dates always pass the date filter, and state deduplication prevents re-processing. Since Featured Stories are infrequent (~2-4/year), this is acceptable.
 
 ### Project Categorization Without Keyword Matching
 
@@ -202,7 +217,7 @@ client-intelligence-digest/
 │   └── processed.json             # Tracked processed articles
 ├── src/
 │   ├── main.py                    # Pipeline orchestrator
-│   ├── scraper.py                 # Dual-path: client-specific + general scraping
+│   ├── scraper.py                 # Two-phase scraping: list extraction + content following
 │   ├── matcher.py                 # Keyword Matcher (general sources only)
 │   ├── summarizer.py              # LLM: Per-client summaries + project categorization
 │   ├── highlights.py              # LLM: Highlight selection

@@ -170,34 +170,40 @@ GitHub Actions Cron (7 AM ET / 12:00 UTC, every Monday)
 
 ## 3. Component Details
 
-### 3.1 Source Scraper (Dual-Path)
+### 3.1 Source Scraper (Dual-Path, Two-Phase)
 
-**Responsibility:** Fetch articles from both client-specific and general sources.
+**Responsibility:** Fetch articles from both client-specific and general sources using a two-phase approach: list extraction then content extraction.
 
-#### 3.1a Client-Specific Source Scraper
+> **Full scraping details** (CSS selectors, JSON paths, per-source behavior) are in `SCRAPING_SPECS.md`.
 
-**Input:** Client registry (each client's media page URLs)
-**Output:** `List[Article]` — articles pre-tagged to their client
+#### Phase 1: List Extraction
+
+Three strategies for extracting article metadata from index/list pages:
+
+| Strategy | Library | Used By | What It Gets |
+|----------|---------|---------|-------------|
+| `json_script` | BeautifulSoup + `json` | News Releases | Title, URL, date from embedded `<script>` JSON |
+| `html_cards` | BeautifulSoup | In the News, Featured Stories | Title, URL, date, source name from `<article>` cards |
+| `rss` | feedparser | Defense News | Title, URL, date, full body text from RSS feed |
+
+#### Phase 2: Content Extraction (Link-Following)
+
+All Draper sources require following links to get full article text. This uses **trafilatura** — a purpose-built library for extracting article content from arbitrary web pages.
 
 ```
 For each client in registry:
     For each client_source:
-        ┌──────────────────┐      ┌──────────────────┐      ┌──────────────────┐
-        │  Fetch HTML Page │      │  Extract Articles│      │  Tag to Client   │
-        │                  │      │                  │      │                  │
-        │  requests +      │─────▶│  CSS selectors   │─────▶│  article.client  │
-        │  BeautifulSoup   │      │  per source      │      │  = client_name   │
-        │                  │      │  (from config)   │      │  article.source  │
-        │                  │      │                  │      │  _path = "client"│
-        └──────────────────┘      └──────────────────┘      └──────────────────┘
+        ┌──────────────────┐      ┌──────────────────┐      ┌──────────────────┐      ┌──────────────────┐
+        │  Fetch List Page │      │  Extract Metadata│      │  Follow Links    │      │  Tag to Client   │
+        │                  │      │                  │      │                  │      │                  │
+        │  requests +      │─────▶│  json_script OR  │─────▶│  trafilatura     │─────▶│  article.client  │
+        │  BeautifulSoup   │      │  html_cards      │      │  extracts body   │      │  = client_name   │
+        │                  │      │  (per config)    │      │  from detail/    │      │  article.source  │
+        │                  │      │                  │      │  external pages  │      │  _path = "client"│
+        └──────────────────┘      └──────────────────┘      └──────────────────┘      └──────────────────┘
 ```
 
-Client-specific sources are almost always HTML pages. Each page has its own structure, so CSS selectors are defined per source in the config.
-
-#### 3.1b General Source Scraper
-
-**Input:** General sources config
-**Output:** `List[Article]` — untagged articles
+For general sources with full-content RSS feeds (like Defense News), Phase 2 is skipped — the body text comes directly from the feed.
 
 ```
 For each general source:
@@ -205,10 +211,10 @@ For each general source:
     │  RSS Adapter     │      │  Normalize to    │
     │  (feedparser)    │      │  Article objects  │
     │                  │      │                  │
-    │  OR              │─────▶│  article.client  │
-    │                  │      │  = None (untagged)│
-    │  HTML Adapter    │      │  article.source  │
-    │  (requests + BS4)│      │  _path = "general"│
+    │  Full body text  │─────▶│  article.client  │
+    │  in feed content │      │  = None (untagged)│
+    │                  │      │  article.source  │
+    │                  │      │  _path = "general"│
     └──────────────────┘      └──────────────────┘
 ```
 
@@ -220,11 +226,13 @@ class Article:
     url: str                    # Canonical URL of the article
     url_hash: str               # SHA-256 hash of URL (for state tracking)
     title: str                  # Article title
-    body: str                   # Full text or summary
-    publish_date: str           # ISO date string
+    body: str                   # Full text extracted via trafilatura or RSS content
+    summary: str                # Short summary (RSS description or first ~200 chars)
+    publish_date: str | None    # ISO date string, or None (Featured Stories)
     source_name: str            # e.g., "Draper — News Releases" or "Defense News"
-    source_type: str            # "rss" or "html"
+    source_type: str            # "json_script", "html_cards", or "rss"
     source_path: str            # "client" or "general"
+    external_source: str | None # Publication name for In the News articles
     client: str | None          # Pre-tagged client (for client sources) or None
     matched_projects: list[str] # Filled by matcher (general) or summarizer (client)
     matched_keywords: list[str] # Filled by matcher (general sources only)
@@ -233,8 +241,9 @@ class Article:
 
 **Rate Limiting:**
 - 3 seconds between requests to the same domain
-- Sources are processed sequentially per domain
+- 1 second between requests to different domains
 - Individual source failures are caught and logged — the pipeline continues
+- User-Agent: `ClientIntelligenceDigest/1.0`
 
 ---
 
@@ -425,33 +434,65 @@ state/
 
 ### 4.2 Clients (`config/clients.json`)
 
+> **Full selector/extraction details** for each source are in `SCRAPING_SPECS.md`.
+
 ```json
 {
   "clients": [
     {
       "client_name": "Draper",
-      "aliases": ["Draper Laboratory", "Charles Stark Draper Laboratory"],
+      "aliases": ["Draper Laboratory", "Charles Stark Draper Laboratory", "Draper Lab"],
       "industry": "Defense & Aerospace",
       "client_sources": [
         {
           "name": "News Releases",
           "url": "https://www.draper.com/media-center/news-releases",
-          "type": "html",
-          "selectors": {},
+          "type": "json_script",
+          "config": {
+            "script_id": "site-news",
+            "fields": {
+              "title": "title.raw",
+              "url": "url.raw",
+              "date": "published_time.raw"
+            }
+          },
+          "follow_links": true,
           "active": true
         },
         {
           "name": "In the News",
           "url": "https://www.draper.com/media-center/in-the-news",
-          "type": "html",
-          "selectors": {},
+          "type": "html_cards",
+          "config": {
+            "selectors": {
+              "container": "article.media.card",
+              "title": ".media-heading a",
+              "link": ".media-heading a",
+              "link_attribute": "href",
+              "date": "time",
+              "date_attribute": "datetime",
+              "source_name": ".news-source"
+            },
+            "base_url": "https://www.draper.com"
+          },
+          "follow_links": true,
           "active": true
         },
         {
           "name": "Featured Stories",
           "url": "https://www.draper.com/media-center/featured-stories",
-          "type": "html",
-          "selectors": {},
+          "type": "html_cards",
+          "config": {
+            "selectors": {
+              "container": "article.media.card",
+              "title": ".media-heading a",
+              "link": ".media-heading a",
+              "link_attribute": "href",
+              "subtitle": ".media-heading p"
+            },
+            "base_url": "https://www.draper.com"
+          },
+          "follow_links": true,
           "active": true
         }
       ],
@@ -484,7 +525,7 @@ state/
   "general_sources": [
     {
       "name": "Defense News",
-      "url": "https://www.defensenews.com/rss/",
+      "url": "https://www.defensenews.com/arc/outboundfeeds/rss/?outputType=xml",
       "type": "rss",
       "active": true
     }
@@ -719,8 +760,8 @@ Return ONLY valid JSON. No markdown, no commentary outside the JSON.
 
 | Stage | Duration | Notes |
 |-------|----------|-------|
-| Client-Specific Scraper | ~30-90s | Depends on number of clients × sources; 3s rate limit |
-| General Source Scraper | ~15-60s | Depends on number of general sources |
+| Client-Specific Scraper (list + follow) | ~60-180s | List pages + trafilatura on each article; 3s same-domain rate limit |
+| General Source Scraper | ~15-60s | RSS parsing (Defense News includes full text, no link-following) |
 | Keyword Matcher | ~1-5s | Local string matching, fast |
 | Merge & Dedup | ~1s | In-memory operation |
 | Per-Client Summarizer | ~30-90s | ~10-15s per client with content |
@@ -785,7 +826,7 @@ client-intelligence-digest/
 | Module | Lines (est.) | LLM? | Description |
 |--------|-------------|------|-------------|
 | `main.py` | ~120 | No | Orchestrates dual-path pipeline |
-| `scraper.py` | ~200 | No | Client-specific + general scraping, RSS/HTML adapters |
+| `scraper.py` | ~250 | No | Two-phase scraping: list extraction (JSON/HTML/RSS) + content extraction (trafilatura) |
 | `matcher.py` | ~120 | No | Keyword matching on general-source articles only |
 | `summarizer.py` | ~90 | Yes | Per-client summaries with project categorization |
 | `highlights.py` | ~70 | Yes | Highlight selection across all clients |
@@ -854,7 +895,7 @@ jobs:
 | Extension | Where It Plugs In | Complexity |
 |-----------|-------------------|------------|
 | **LLM-assisted matching** | `matcher.py` — add LLM pass after keyword matching | Medium |
-| **Additional source adapters** | `scraper.py` — e.g., API-based, JS-rendered | Low–Medium |
+| **Additional source adapters** | `scraper.py` — new source types per `SCRAPING_SPECS.md` checklist | Low–Medium |
 | **Per-subscriber client filtering** | `email_composer.py` — filter sections per recipient | Medium |
 | **Sentiment analysis** | `summarizer.py` — add sentiment to project summaries | Low |
 | **Historical trend tracking** | `state_manager.py` — aggregate mention counts over time | Medium |
@@ -870,8 +911,8 @@ jobs:
 |--------|---------------|-----------|
 | **Architecture** | Dual-path scraping → merge → linear pipeline | Clean handling of two fundamentally different source types |
 | **State** | JSON file committed to repo | Minimal infrastructure; git-native |
-| **Client sources** | HTML scraping with per-source selectors | Each client's website is different; config-driven selectors |
-| **General sources** | RSS + HTML adapters | Most industry pubs have RSS; HTML for those that don't |
+| **Client sources** | Two-phase: list extraction (JSON/HTML) + link-following (trafilatura) | Each client's website has unique structure; per-source config; trafilatura handles content from any page |
+| **General sources** | RSS with full content (Defense News) | Full article text in feed; no link-following needed |
 | **Matching** | Keyword-based on general sources only | Client sources don't need matching; keywords are free and fast |
 | **LLM** | Claude Sonnet for summarization + highlights | Summarizer also handles project categorization for client sources |
 | **LLM Calls** | Variable (1 per client + 1 highlight) | Scales with actual content volume |

@@ -61,22 +61,38 @@ The system uses a **dual-path source model**: client-specific sources (scraped v
 - Tolerant of malformed XML (common in real-world feeds)
 - Date parsing across multiple formats
 
-### 3.2 HTML Scraping
+### 3.2 HTML Scraping & List Extraction
 
 | Library | Purpose | Why This One |
 |---------|---------|--------------|
 | **`requests`** | Fetch HTML pages from configured sources | De facto standard for Python HTTP. Simple API, connection pooling, retries. |
-| **`beautifulsoup4`** | Parse HTML and extract article content using CSS selectors | Industry standard for HTML parsing. Tolerant of messy HTML, excellent CSS selector support. |
+| **`beautifulsoup4`** | Parse HTML and extract article metadata from list/index pages | Industry standard for HTML parsing. Tolerant of messy HTML, excellent CSS selector support. |
 
 **What it gives us:**
 - Fetch any public webpage
-- Extract article content using per-source CSS selectors (title, body, date, links)
+- Extract article metadata from three list page patterns: JSON-in-HTML `<script>` tags, HTML card elements, and structured listings
 - Handle malformed HTML gracefully
 - Simple, readable extraction code
 
 **Alternative considered:** `Playwright` / `Selenium` for JavaScript-rendered pages. These are heavier (require a browser binary) and slower. Deferred unless specific sources require JS rendering.
 
-### 3.3 LLM Integration
+### 3.3 Article Content Extraction
+
+| Library | Purpose | Why This One |
+|---------|---------|--------------|
+| **`trafilatura`** | Extract main article text from any web page by following links | Purpose-built for article extraction. Handles arbitrary page structures without per-site selectors. Strips boilerplate, navigation, ads. Also extracts metadata (date, author). |
+
+**What it gives us:**
+- Follow links from Draper's list pages to detail pages and extract the full article text
+- Follow external links (e.g., In the News → Semiconductor Digest) and extract article content from unknown page structures
+- Extract metadata (dates, authors) as fallback when list pages don't provide them
+- Works on both client-hosted pages and third-party publication sites with zero configuration
+
+**Why not per-site CSS selectors for detail pages?**
+
+We need to handle both Draper's own detail pages AND external publication sites (Semiconductor Digest, Washington Technology, Space News, etc.). External sites have unpredictable HTML structures, so we need a generic extractor anyway. Using trafilatura for everything keeps the codebase simpler.
+
+### 3.4 LLM Integration
 
 | Library | Purpose | Why This One |
 |---------|---------|--------------|
@@ -95,7 +111,7 @@ The system uses a **dual-path source model**: client-specific sources (scraped v
 - Consistency across stages simplifies the system
 - Quality matters — the account manager relies on these summaries for client interactions
 
-### 3.4 Email Composition
+### 3.5 Email Composition
 
 | Library | Purpose | Why This One |
 |---------|---------|--------------|
@@ -107,7 +123,7 @@ The system uses a **dual-path source model**: client-specific sources (scraped v
 - Conditional rendering (highlights present or not, quiet week notice)
 - Filters for formatting dates, truncating text
 
-### 3.5 Email Delivery
+### 3.6 Email Delivery
 
 | Library | Purpose | Why This One |
 |---------|---------|--------------|
@@ -116,7 +132,7 @@ The system uses a **dual-path source model**: client-specific sources (scraped v
 
 No third-party library needed for email sending.
 
-### 3.6 Configuration & Environment
+### 3.7 Configuration & Environment
 
 | Library | Purpose | Why This One |
 |---------|---------|--------------|
@@ -140,9 +156,12 @@ No third-party library needed for email sending.
 # Core — RSS feed parsing
 feedparser>=6.0.0
 
-# Core — HTML scraping
+# Core — HTML scraping (list page extraction)
 requests>=2.31.0
 beautifulsoup4>=4.12.0
+
+# Core — Article content extraction (link-following)
+trafilatura>=2.0.0
 
 # Core — LLM integration
 anthropic>=0.40.0
@@ -161,7 +180,7 @@ pytest-mock>=3.14.0
 ruff>=0.8.0
 ```
 
-**Total direct dependencies: 9** (6 runtime + 3 dev-only)
+**Total direct dependencies: 10** (7 runtime + 3 dev-only)
 
 No heavy frameworks, no browser automation, no databases. Minimal footprint.
 
@@ -318,6 +337,7 @@ Thumbs.db
 | Language | Python 3.12 | Node.js, Go | Richest scraping/AI ecosystem; every dependency is Python-native |
 | RSS parsing | feedparser | Raw XML parsing, scrapy | Cleanest API; handles edge cases and format variations |
 | HTML scraping | requests + BeautifulSoup | Playwright, Selenium, scrapy | Lightweight; no browser binary needed; sufficient for static pages |
+| Article extraction | trafilatura | newspaper3k, readability-lxml, manual selectors | Best accuracy on news/article pages; handles arbitrary sites; extracts metadata |
 | LLM provider | Anthropic Claude | OpenAI GPT-4o | Consistent with existing ArXiv digest; good summarization quality |
 | LLM model | Claude Sonnet (all stages) | Mixed models | Cost difference negligible at weekly frequency; simplicity wins |
 | Email sending | Gmail SMTP (stdlib) | SendGrid, Resend, AWS SES | Zero cost, zero setup, sufficient for small subscriber list |
@@ -335,7 +355,7 @@ Thumbs.db
 | Layer | Technology | Count |
 |-------|-----------|-------|
 | **Runtime** | Python 3.12 on GitHub Actions (Ubuntu) | — |
-| **Runtime deps** | feedparser, requests, beautifulsoup4, anthropic, Jinja2, python-dotenv | 6 |
+| **Runtime deps** | feedparser, requests, beautifulsoup4, trafilatura, anthropic, Jinja2, python-dotenv | 7 |
 | **Dev deps** | pytest, pytest-mock, ruff | 3 |
 | **Stdlib modules** | smtplib, email, json, os, pathlib, logging, datetime, dataclasses, re, hashlib, traceback, time | 12 |
 | **External services** | GitHub Actions, Anthropic API, Gmail SMTP | 3 |

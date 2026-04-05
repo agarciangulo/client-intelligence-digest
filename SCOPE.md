@@ -103,20 +103,20 @@ The client registry defines *who we're tracking* and *where to look*. Each clien
         {
           "name": "News Releases",
           "url": "https://www.draper.com/media-center/news-releases",
-          "type": "html",
-          "selectors": { }
+          "type": "json_script",
+          "follow_links": true
         },
         {
           "name": "In the News",
           "url": "https://www.draper.com/media-center/in-the-news",
-          "type": "html",
-          "selectors": { }
+          "type": "html_cards",
+          "follow_links": true
         },
         {
           "name": "Featured Stories",
           "url": "https://www.draper.com/media-center/featured-stories",
-          "type": "html",
-          "selectors": { }
+          "type": "html_cards",
+          "follow_links": true
         }
       ],
       "projects": [
@@ -148,7 +148,7 @@ The client registry defines *who we're tracking* and *where to look*. Each clien
   "general_sources": [
     {
       "name": "Defense News",
-      "url": "https://www.defensenews.com/rss/",
+      "url": "https://www.defensenews.com/arc/outboundfeeds/rss/?outputType=xml",
       "type": "rss",
       "active": true
     }
@@ -182,10 +182,13 @@ General sources are industry-wide publications that may mention any tracked clie
 
 | Type | Library | How It Works | Best For |
 |------|---------|--------------|----------|
-| **RSS** | `feedparser` | Parses structured RSS/Atom feed; articles come with title, link, summary, date | Publications with RSS feeds (most news sites like Defense News) |
-| **HTML** | `requests` + `BeautifulSoup` | Fetches the page, extracts articles using CSS selectors defined per source | Sites without RSS feeds |
+| **RSS** | `feedparser` | Parses structured RSS/Atom feed; articles come with title, link, date, and sometimes full text | General industry publications (e.g., Defense News — includes full article text) |
+| **JSON-in-HTML** | `requests` + `BeautifulSoup` + `json` | Extracts article metadata from embedded `<script>` JSON tags | Pages using search-based frontends (e.g., Draper News Releases) |
+| **HTML cards** | `requests` + `BeautifulSoup` | Extracts article metadata from `<article>` card elements using CSS selectors | Structured listing pages (e.g., Draper In the News, Featured Stories) |
 
-Both types produce the same `Article` output. Everything downstream is source-type-agnostic.
+All client-specific sources require **link-following** after list extraction. Article body text is extracted from detail/external pages using **trafilatura**, a generic article extraction library.
+
+All types produce the same `Article` output. Everything downstream is source-type-agnostic. Full CSS selectors and extraction details are in `SCRAPING_SPECS.md`.
 
 ---
 
@@ -431,6 +434,19 @@ Keep the last 90 days of processed articles in state. Older entries are pruned o
 ---
 
 ## Resolved Design Decisions
+
+### Backfill Mode
+
+The first run will use an extended lookback window to catch up on content since January 1, 2026. After the initial backfill, the system switches to weekly mode.
+
+| Mode | `LOOKBACK_DAYS` | Coverage |
+|------|-----------------|----------|
+| **Backfill** | `95` (adjusted for actual date) | Jan 1, 2026 – present |
+| **Weekly** | `7` (default) | Previous 7 days |
+
+Featured Stories (which have no reliable dates) are always included regardless of the lookback window — state deduplication prevents re-processing.
+
+The Defense News RSS feed only retains ~50 recent articles (~3-5 days), so the backfill cannot recover older general source matches. This is acceptable since the Draper-specific sources cover the primary content.
 
 ### Scheduling & Timing
 
