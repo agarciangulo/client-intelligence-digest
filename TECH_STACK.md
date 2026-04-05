@@ -178,7 +178,7 @@ No heavy frameworks, no browser automation, no databases. Minimal footprint.
 | `os` | Environment variable access | `main.py`, config loading |
 | `pathlib` | File path handling | Multiple modules |
 | `logging` | Structured logging throughout pipeline | All modules |
-| `datetime` | Date range calculations for weekly window | `collector.py`, `main.py` |
+| `datetime` | Date range calculations for weekly window | `scraper.py`, `main.py` |
 | `dataclasses` | Article, Client, Match data models | Multiple modules |
 | `re` | Keyword matching with word boundaries | `matcher.py` |
 | `hashlib` | URL hashing for state deduplication | `state_manager.py` |

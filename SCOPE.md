@@ -90,6 +90,8 @@ The client registry defines *who we're tracking* and *where to look*. Each clien
 
 ### Registry Structure
 
+**`config/clients.json`** — Client registry with client-specific sources and projects:
+
 ```json
 {
   "clients": [
@@ -135,7 +137,14 @@ The client registry defines *who we're tracking* and *where to look*. Each clien
         }
       ]
     }
-  ],
+  ]
+}
+```
+
+**`config/general_sources.json`** — Industry-wide publications (separate file):
+
+```json
+{
   "general_sources": [
     {
       "name": "Defense News",
